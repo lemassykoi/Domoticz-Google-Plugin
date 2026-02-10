@@ -491,8 +491,21 @@ class GoogleDevice:
         self.GoogleDevice.set_volume(int(Parameters["Mode3"]) / 100)
         self.GoogleDevice.set_volume_muted(False)
 
-    def RestoreState(self):
+    def RestoreState(self, stop_event=None):
         if self.State.get('Volume') is not None:
+            waited = 0
+            while not self.Ready and waited < 10:
+                Domoticz.Debug(f"RestoreState: Waiting for '{self.Name}' to reconnect...")
+                if stop_event is not None:
+                    stop_event.wait(1.0)
+                    if stop_event.is_set():
+                        return
+                else:
+                    time.sleep(1.0)
+                waited += 1
+            if not self.Ready:
+                Domoticz.Error(f"RestoreState: '{self.Name}' did not reconnect in time, state not restored.")
+                return
             try:
                 self.GoogleDevice.quit_app()
             except Exception as err:
@@ -560,6 +573,9 @@ class BasePlugin:
                     if self.stop_event.is_set():
                         break
                     if self.googleDevices[uuid].GoogleDevice.name == Message["Target"]:
+                        if self.googleDevices[uuid].GoogleDevice.status is not None and self.googleDevices[uuid].GoogleDevice.status.volume_muted:
+                            Domoticz.Log(f"Device '{Message['Target']}' is muted, notification skipped.")
+                            break
                         if self.googleDevices[uuid].Ready:
                             language = Parameters.get("Mode2", "").strip()
                             if not language:
@@ -613,7 +629,7 @@ class BasePlugin:
                                     Domoticz.Debug(f"Waiting for player to start (timeout in {str(endTime - time.time())[:4]} seconds)")
                             if not self.stop_event.is_set():
                                 self.stop_event.wait(2.0)
-                            self.googleDevices[uuid].RestoreState()
+                            self.googleDevices[uuid].RestoreState(self.stop_event)
 
                             if playbackCompleted:
                                 Domoticz.Log(f"Notification sent to '{Message['Target']}' completed")
