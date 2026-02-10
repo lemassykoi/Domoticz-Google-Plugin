@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pyo
+Messages/
+Messages.log
+AGENTS.md

@@ -1,93 +1,153 @@
-# Domoticz-Google Plugin
-Full version of Google Chromecast & Home Python Plugin for Domoticz home automation
+# Domoticz Google Audio Plugin
 
-Controls multiple Google Chromecasts and Homes on your network.   Tested on Linux only.
+Domoticz Python plugin for Google Home and Nest audio speakers. Discovers audio devices and groups on the local network, provides status monitoring, volume/media control, and TTS voice notifications via gTTS.
+
+**Audio only** — video devices (Chromecast, Google TV) are filtered out.
+
+Tested on Linux (Raspberry Pi / Debian).
 
 ## Key Features
 
-* Devices are discovered automatically and created in the Devices tab
-* Voice notifications can be sent to selected Google triggered by Domoticz notifications 
-* When network connectivity is lost the Domoticz UI will optionally show the device(s) with Red banner
-* Device icons are created in Domoticz
-* Domoticz can control the Application selected
-* Domoticz can control the Volume including Mute/Unmute
-* Domoticz can control the playing media.  Play/Pause and skip forward and backwards
-* Google devices can be the targets of native Domoticz notifications in two different ways. Notifications are spoken in the language specified in Domoticz:
-	* As a normal notification, these are sent to the device identified in the 'Voice Device/Group' hardware parameter
-	* From a Domoticz event script targeting a specific device
+- Audio devices and groups are discovered automatically via mDNS/zeroconf
+- Domoticz can control volume (including mute/unmute)
+- Domoticz can control media playback (play/pause, seek, skip)
+- Domoticz can control the active application (Spotify, YouTube, etc.)
+- Voice notifications via Google Text-to-Speech (gTTS) — triggered by Domoticz notifications or event scripts
+- When network connectivity is lost, devices show a red banner in the Domoticz UI
+- Custom device icons included (Google Home Mini)
+
+## Supported Audio Models
+
+Google Home, Google Home Mini, Google Nest Mini, Google Nest Hub, Google Nest Audio, Nest Audio, Home Mini, Google Cast Group, Lenovo Smart Clock.
+
+## Requirements
+
+- Domoticz 2024+ with Python plugin support
+- Python 3.9+
+- `pychromecast` (13.0.4 or later)
+- `gTTS` (optional — voice notifications disabled if not installed)
 
 ## Installation
 
-Python version 3.7.3 or higher required & a 2019 version of Domoticz (for voice to work).  On Python 3.6.x this plugin will crash Domoticz 10-20% of the time when the plugin is stopped or restarted. This appears related to a defect introduced in Python 3.6 that has been reported on the Internet.
+```bash
+cd domoticz/plugins
+git clone https://github.com/lemassykoi/Domoticz-Google-Plugin.git
+pip install pychromecast gtts --break-system-packages
+sudo systemctl restart domoticz
+```
 
-To install:
-* Go in your Domoticz directory using a command line.
-* Run: ```cd plugins```
-* Run ```sudo pip3 install pychromecast``` should be version 13.0.4 or greater
-* Run ```sudo pip3 install gtts```
-* Run: ```git clone https://github.com/dnpwwo/Domoticz-Google-Plugin.git```
-* Verify that ```domoticz/plugins``` contains ```plugin.py``` and 2 icon files
-* Restart Domoticz.
-
-In the web UI, navigate to the Hardware page.  In the hardware dropdown there will be an entry called "Google Devices - Chromecast and Home".
-
-To send voice notifications enter a Google device name in the 'Voice Device/Group' field in the hardware tab, then use the Domoticz standard Notification capability for individual Domoticz devices. Selecting notification target of 'Google_Devices' will cause the notification text to be spoken by the Google device.
+In the Domoticz web UI, go to **Setup → Hardware**, select **Google Audio Devices** from the dropdown, and click **Add**.
 
 ## Updating
 
-To update:
-* Go in your Domoticz directory using a command line and open the plugins directory then the Domoticz-Google-Plugin directory.
-* Run: ```git pull```
-* Restart Domoticz.
+```bash
+cd domoticz/plugins/Domoticz-Google-Plugin
+git pull
+sudo systemctl restart domoticz
+```
 
 ## Configuration
 
-### Google Chromecast & Home Devices
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| Preferred Audio App | App to launch for 'Audio' script commands (Spotify / YouTube / None) | Spotify |
+| Voice message volume | Volume during TTS playback (10–100%), restored afterwards | 50% |
+| Voice Device/Group | Device or audio group name for Domoticz notifications (must match the device's friendly name exactly as seen in Google Home app) | (empty) |
+| TTS Language | Language code for gTTS (e.g., `fr`, `en`, `de`, `es`) | `fr` |
+| Room Plan Name | Domoticz room plan to auto-create and assign devices to | Google |
+| Log to file | Write device status messages to `Messages.log` for debugging | False |
+| Debug | Logging level (None / Plugin Debug / All) | None |
 
-Nothing !
+## Devices Created Per Speaker
 
-### Domoticz
+Each discovered audio device creates 3 Domoticz devices:
 
-| Field | Information |
-| ----- | ---------- |
-| Preferred Video/Audio Apps | Application to select when scripts request 'Video' or 'Audio' mode |
-| Voice message volume | Volume to play messages (previous level will be restored afterwards) |
-| Voice Device/Group | If specified device (or Audio Group) will receive audible notifications. The is the device's 'friendly name' as seen via the Google Home App. 'Google_Devices' will appear as a notification target when editing any Domoticz device that supports Notifications |
-| Time Out Lost Devices | When true, the devices in Domoitcz will have a red banner when network connectivity is lost |
-| Log to file | When true, messages from Google devices are written to Messages.log in the Plugin's directory |
-| Debug | When true the logging level will be much higher to aid with troubleshooting |
+| Device | Type | Description |
+|--------|------|-------------|
+| *Name* Status | Media Player | Shows current app/media info. On = playing, Off = idle/screensaver |
+| *Name* Volume | Dimmer (0–100%) | Icon toggles mute, slider sets volume |
+| *Name* Playing | Dimmer (0–100%) | Icon toggles play/pause, slider shows/sets position in current media |
 
-## Supported Script Commands
+A **Source** selector switch is created dynamically when apps are detected, showing all apps seen on the device.
 
-| Command | Information |
-| ----- | ---------- |
-| On | For 'Volume' Device - Turns mute off, <br/>For 'Playing' Device - Resume playback |
-| Set Volume &lt;vol><br/>Set Level &lt;level&gt; | For 'Volume' Device - Sets volume percentage to &lt;vol&gt;, <br/>For 'Playing' Device - Sets position in media to &lt;level&gt; percent<br/>For Source device - Sets current Window |
-| Play<br/>Playing | Resumes playing current media |
-| Pause<br/>Paused | Pauses playing current media |
-| Rewind | Sets position in current media back to the start |
-| Stop<br/>Stopped | Stops playing current media |
-| Trigger &lt;URL&gt; | Start playing &lt;URL&gt; |
-| Video | Switch device to the selected Video App |
-| Audio | Switch device to the selected Audio App |
-| Quit | Quits the current application on the device |
-| Off | For 'Volume' Device - Turns mute on, <br/>For 'Playing' Device - Pause playback |
-| SendNotifiction | Target device speaks the message text e.g. ```commandArray['Lounge Home'] = "SendNotification Good morning"``` |
+## Script Commands
 
-## Change log
+Commands can be sent to devices from Lua, dzVents, or Python event scripts.
 
-| Version | Information |
-| ----- | ---------- |
-| 1.13.1 | Bugfix: Plugin now waits for voice playback correctly |
-| 1.14.7 | Bugfix: Long media file now play |
-| 1.15.3 | Improved logging during mp3 transfer |
-| 1.16.13 | Bugfix: Handle groups changing 'elected leader' |
-| 1.18.13 | Revamped device updates + improved debugging |
-| 1.18.35 | Bugfix: Stopped devices being marked 'Off', fixed Playing slider |
-| 1.18.37 | Bugfix: Media text not showing correctly |
-| 1.19.5 | Removed Address & Port parameters because they seemed to confuse people. Now determined internally. |
-| 1.22.0 | Support newer versions of PyChromeCast where the host is not available |
-| 2.0.2 | Support newer versions of PyChromeCast (13.0.4) and related imports |
-| 2.0.3 | Bugfix: Suppress occasional TypeError in UpdatePlaying function |
-| 2.0.4 | Bugfix: Fix 'Model' errors during initial discovery |
-| 2.0.5 | Bugfix: Handle more 'None' values |
+| Command | Description |
+|---------|-------------|
+| `On` | Volume device: unmute. Playing device: resume |
+| `Off` | Volume device: mute. Playing device: pause. Source device: quit app |
+| `Set Level <N>` | Volume device: set volume %. Playing device: seek to N% of media. Source device: select app |
+| `Play` / `Playing` | Resume current media |
+| `Pause` / `Paused` | Pause current media |
+| `Rewind` | Seek to start of current media |
+| `Audio` | Switch to the preferred audio app |
+| `Quit` | Quit the current application |
+| `Sendnotification <text>` | Speak `<text>` on the target device via TTS |
+
+### Example (Lua)
+
+```lua
+commandArray['Lounge Home Volume'] = 'Set Level 40'
+commandArray['Lounge Home Playing'] = 'Pause'
+```
+
+## Voice Notifications (TTS)
+
+See [NOTIFICATIONS.md](NOTIFICATIONS.md) for detailed examples using Lua, dzVents, Python, and the HTTP API.
+
+### Quick Start
+
+1. Set **Voice Device/Group** to your speaker's friendly name (e.g., `Bureau`)
+2. Set **TTS Language** (e.g., `fr`)
+3. From any Domoticz notification source, use subsystem `Google_Devices`:
+
+```lua
+-- Lua
+commandArray['SendNotification'] = 'Title#Bonjour, ceci est un test.#0#sound##Google_Devices'
+```
+
+```bash
+# HTTP API
+curl "http://DOMOTICZ_IP:PORT/json.htm?type=command&param=sendnotification&subject=Test&body=Hello+world&subsystem=Google_Devices"
+```
+
+### How It Works
+
+1. Plugin generates an MP3 via gTTS
+2. Saves the device's current volume and app state
+3. Sets volume to the configured notification level
+4. Serves the MP3 via a built-in HTTP server (random port 10001–19999)
+5. Waits for playback to complete
+6. Restores the previous volume and app state
+
+## Troubleshooting
+
+### Devices not discovered
+- Ensure the Domoticz host is on the same network/VLAN as the Google devices
+- Check that mDNS/multicast traffic is allowed on your network
+- Check the log for `Ignoring non-audio device` messages (video devices are filtered out)
+
+### Voice notification not spoken
+- Verify **Voice Device/Group** matches the device's friendly name exactly
+- Ensure `gTTS` is installed: `pip install gTTS --break-system-packages`
+- Check the Domoticz log for `gtts module import error` messages
+
+### Notification cut short or "timed out"
+- The plugin waits for playback duration + 5 seconds. Network latency may cause timeouts
+- Check for TCP connection drops in the log
+- The message may still have played correctly on the speaker
+
+### Plugin won't restart after config change
+- Python 3.13: zeroconf C extensions can't reload into a new sub-interpreter
+- Restart the Domoticz service instead: `sudo systemctl restart domoticz`
+
+### Thread warnings in log
+- pychromecast spawns internal threads for each device connection
+- The plugin waits up to 30 seconds for all threads to terminate on shutdown
+- Occasional "thread is still running" messages during stop are normal and handled automatically
+
+## License
+
+See [LICENSE](LICENSE).
