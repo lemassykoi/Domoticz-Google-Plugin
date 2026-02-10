@@ -50,13 +50,13 @@ sudo systemctl restart domoticz
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| Preferred Audio App | App to launch for 'Audio' script commands (Spotify / YouTube / None) | Spotify |
-| Voice message volume | Volume during TTS playback (10–100%), restored afterwards | 50% |
+| TTS Media Server Port | Fixed TCP port for the HTTP server that serves TTS audio files to Google devices | `15555` |
 | Voice Device/Group | Device or audio group name for Domoticz notifications (must match the device's friendly name exactly as seen in Google Home app) | (empty) |
 | TTS Language | Language code for gTTS (e.g., `fr`, `en`, `de`, `es`) | `fr` |
+| Voice message volume | Volume during TTS playback (10–100%), restored afterwards | 50% |
 | Room Plan Name | Domoticz room plan to auto-create and assign devices to | Google |
-| Log to file | Write device status messages to `Messages.log` for debugging | False |
-| Debug | Logging level (None / Plugin Debug / All) | None |
+| Preferred Audio App | App to launch for 'Audio' script commands (Spotify / YouTube / None) | Spotify |
+| Debug | Logging level (None / Plugin Debug / All). When enabled, device status messages are also written to `Messages.log` | None |
 
 ## Devices Created Per Speaker
 
@@ -118,7 +118,7 @@ curl "http://DOMOTICZ_IP:PORT/json.htm?type=command&param=sendnotification&subje
 1. Plugin generates an MP3 via gTTS
 2. Saves the device's current volume and app state
 3. Sets volume to the configured notification level
-4. Serves the MP3 via a built-in HTTP server (random port 10001–19999)
+4. Serves the MP3 via a built-in HTTP server on the configured TTS Media Server Port
 5. Waits for playback to complete
 6. Restores the previous volume and app state
 

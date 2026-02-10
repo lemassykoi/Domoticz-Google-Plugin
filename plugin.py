@@ -32,23 +32,19 @@
         </ul>
         <h3>Configuration</h3>
         <ul style="list-style-type:square">
-            <li style="line-height:normal">Preferred Audio App - Application to select when scripts request 'Audio' mode</li>
-            <li style="line-height:normal">Voice message volume - Volume to play messages (previous level will be restored afterwards)</li>
+            <li style="line-height:normal">TTS Media Server Port - Fixed port for the HTTP server that serves TTS audio to Google devices</li>
             <li style="line-height:normal">Voice Device/Group - If specified, device (or Audio Group) will receive audible notifications</li>
-            <li style="line-height:normal">Time Out Lost Devices - When true, devices in Domoticz will have a red banner when connectivity is lost</li>
+            <li style="line-height:normal">TTS Language - Language code for gTTS text-to-speech</li>
+            <li style="line-height:normal">Voice message volume - Volume to play messages (previous level will be restored afterwards)</li>
             <li style="line-height:normal">Room Plan Name - Name of the Domoticz room plan to create and assign devices to</li>
-            <li style="line-height:normal">Log to file - When true, messages from Google devices are written to Messages.log</li>
+            <li style="line-height:normal">Preferred Audio App - Application to select when scripts request 'Audio' mode</li>
             <li style="line-height:normal">Debug - Logging level for troubleshooting</li>
         </ul>
     </description>
     <params>
-        <param field="Address" label="Preferred Audio App" width="150px">
-            <options>
-                <option label="Spotify" value="{|Audio|:|Spotify|}" default="true"/>
-                <option label="Youtube" value="{|Audio|:|Youtube|}"/>
-                <option label="None" value="{|Audio|:||}"/>
-            </options>
-        </param>
+        <param field="Port" label="TTS Media Server Port" width="75px" required="true" default="15555"/>
+        <param field="Mode1" label="Voice Device/Group" width="150px"/>
+        <param field="Mode2" label="TTS Language" width="75px" required="false" default="fr"/>
         <param field="Mode3" label="Voice message volume" width="50px" required="true">
             <options>
                 <option label="10%" value="10"/>
@@ -63,13 +59,12 @@
                 <option label="100%" value="100"/>
             </options>
         </param>
-        <param field="Mode1" label="Voice Device/Group" width="150px"/>
-        <param field="Mode2" label="TTS Language" width="75px" required="false" default="fr"/>
         <param field="Mode4" label="Room Plan Name" width="200px" required="false" default="Google"/>
-        <param field="Mode5" label="Log to file" width="75px">
+        <param field="Mode5" label="Preferred Audio App" width="150px">
             <options>
-                <option label="True" value="True"/>
-                <option label="False" value="False" default="true"/>
+                <option label="Spotify" value="Spotify" default="true"/>
+                <option label="Youtube" value="Youtube"/>
+                <option label="None" value="" />
             </options>
         </param>
         <param field="Mode6" label="Debug" width="150px">
@@ -90,7 +85,6 @@ import threading as _threading
 import time
 import json
 import queue as _queue
-import random
 import urllib.parse
 import pychromecast
 import pychromecast.config as Consts
@@ -448,7 +442,7 @@ class GoogleDevice:
                 Domoticz.Error(f"new_connection_status: {new_status}")
 
     def LogToFile(self, status):
-        if Parameters["Mode5"] != "False" and status is not None:
+        if Parameters["Mode6"] != "0" and status is not None:
             log_path = os.path.join(Parameters["HomeFolder"], "Messages.log")
             print(time.strftime('%Y-%m-%d %H:%M:%S') + " [" + self.Name + "] " + str(status), file=open(log_path, "a"))
 
@@ -499,11 +493,17 @@ class GoogleDevice:
 
     def RestoreState(self):
         if self.State.get('Volume') is not None:
-            self.GoogleDevice.quit_app()
-            if 'Volume' in self.State:
-                self.GoogleDevice.set_volume(self.State['Volume'])
-            if 'Muted' in self.State:
-                self.GoogleDevice.set_volume_muted(self.State['Muted'])
+            try:
+                self.GoogleDevice.quit_app()
+            except Exception as err:
+                Domoticz.Error(f"RestoreState: Failed to quit app: {err}")
+            try:
+                if 'Volume' in self.State:
+                    self.GoogleDevice.set_volume(self.State['Volume'])
+                if 'Muted' in self.State:
+                    self.GoogleDevice.set_volume_muted(self.State['Muted'])
+            except Exception as err:
+                Domoticz.Error(f"RestoreState: Failed to restore volume: {err}")
         else:
             Domoticz.Log("No device state to restore after notification")
 
@@ -531,7 +531,7 @@ class BasePlugin:
         global voiceEnabled
         Domoticz.Debug("handleMessage: Entering notification handler")
         ipAddress = GetIP()
-        ipPort = str(random.randint(10001, 19999))
+        ipPort = Parameters["Port"]
 
         if len(ipAddress) > 0:
             Domoticz.Log(f"Notifications will use IP Address: {ipAddress}:{ipPort} to serve audio media.")
@@ -578,30 +578,39 @@ class BasePlugin:
 
                             self.googleDevices[uuid].StoreState()
                             mc = self.googleDevices[uuid].GoogleDevice.media_controller
-                            mc.play_media(f"http://{ipAddress}:{ipPort}/{uuid}.mp3", 'audio/mp3')
+                            cacheBuster = str(int(time.time() * 1000))
+                            mediaUrl = f"http://{ipAddress}:{ipPort}/{uuid}.mp3?t={cacheBuster}"
+                            fileSize = os.path.getsize(messageFileName)
+                            estimatedDuration = fileSize * 8 / 64000
+                            mc.play_media(mediaUrl, 'audio/mpeg')
                             mc.block_until_active(timeout=10)
                             self.stop_event.wait(1.5)
                             if self.stop_event.is_set():
                                 break
-                            mc.update_status()
-                            endTime = time.time() + 15
-                            while mc.status.player_is_idle and time.time() < endTime and not self.stop_event.is_set():
-                                Domoticz.Debug(f"Waiting for player to start (timeout in {str(endTime - time.time())[:4]} seconds)")
-                                self.stop_event.wait(0.5)
-                                mc.update_status()
-                            if mc.status.duration is not None:
-                                endTime = time.time() + mc.status.duration + 5
+                            sawPlaying = False
+                            durationSet = False
+                            endTime = time.time() + max(15, estimatedDuration + 10)
                             playbackCompleted = False
                             while time.time() < endTime and not self.stop_event.is_set():
                                 mc.update_status()
-                                if mc.status.player_is_idle:
+                                self.stop_event.wait(0.5)
+                                if self.stop_event.is_set():
+                                    break
+                                if mc.status.player_is_playing or mc.status.player_is_paused:
+                                    sawPlaying = True
+                                if sawPlaying and not durationSet and mc.status.duration is not None:
+                                    endTime = time.time() + mc.status.duration + 5
+                                    durationSet = True
+                                if sawPlaying and mc.status.player_is_idle:
                                     playbackCompleted = True
                                     break
-                                if mc.status.duration is not None:
-                                    Domoticz.Debug(f"Playing ({str(mc.status.adjusted_current_time)[:4]} of {mc.status.duration}, timeout in {str(endTime - time.time())[:4]} seconds)")
+                                if sawPlaying:
+                                    if mc.status.duration is not None:
+                                        Domoticz.Debug(f"Playing ({str(mc.status.adjusted_current_time)[:4]} of {mc.status.duration}, timeout in {str(endTime - time.time())[:4]} seconds)")
+                                    else:
+                                        Domoticz.Debug(f"Playing (unknown duration, timeout in {str(endTime - time.time())[:4]} seconds)")
                                 else:
-                                    Domoticz.Debug(f"Playing (unknown duration, timeout in {str(endTime - time.time())[:4]} seconds)")
-                                self.stop_event.wait(0.5)
+                                    Domoticz.Debug(f"Waiting for player to start (timeout in {str(endTime - time.time())[:4]} seconds)")
                             if not self.stop_event.is_set():
                                 self.stop_event.wait(2.0)
                             self.googleDevices[uuid].RestoreState()
@@ -670,11 +679,8 @@ class BasePlugin:
             Domoticz.Debugging(int(Parameters["Mode6"]))
             DumpConfigToLog()
 
-        try:
-            self.appPrefs = json.loads(Parameters["Address"].replace('|', '"'))
-        except (json.JSONDecodeError, KeyError):
-            self.appPrefs = {"Audio": "Spotify"}
-            Domoticz.Log("Preferred Audio App not configured, defaulting to Spotify")
+        audioApp = Parameters.get("Mode5", "Spotify").strip()
+        self.appPrefs = {"Audio": audioApp}
 
         if Parameters['Key'] + 'HomeMini' not in Images:
             Domoticz.Image('GoogleHomeMini.zip').Create()
@@ -727,12 +733,10 @@ class BasePlugin:
                 elif 'Headers' not in Data:
                     Domoticz.Error("Invalid web request received, no Headers present")
                     headerCode = "400 Bad Request"
-                elif 'Range' not in Data['Headers']:
-                    Domoticz.Error("Invalid web request received, no Range header present")
-                    headerCode = "400 Bad Request"
                 else:
                     messagesDir = os.path.join(Parameters['HomeFolder'], 'Messages')
-                    filePath = os.path.join(messagesDir, Data['URL'].lstrip('/'))
+                    urlPath = Data['URL'].split('?')[0]
+                    filePath = os.path.join(messagesDir, urlPath.lstrip('/'))
                     if not os.path.exists(filePath):
                         Domoticz.Error(f"Invalid web request received, file '{filePath}' does not exist")
                         headerCode = "404 File Not Found"
@@ -741,15 +745,38 @@ class BasePlugin:
                     DumpHTTPResponseToLog(Data)
                     Connection.Send({"Status": headerCode})
                 else:
-                    rangeHeader = Data['Headers']['Range']
-                    fileStartPosition = int(rangeHeader[rangeHeader.find('=') + 1:rangeHeader.find('-')])
                     messageFileSize = os.path.getsize(filePath)
-                    messageFile = open(filePath, mode='rb')
-                    messageFile.seek(fileStartPosition)
-                    fileContent = messageFile.read(KB_TO_XMIT)
-                    endByte = fileStartPosition + len(fileContent) - 1
-                    Domoticz.Debug(f"{Connection.Address}:{Connection.Port} Sent 'GET' request file '{Data['URL']}' from position {fileStartPosition}, {len(fileContent)} bytes will be returned")
-                    Connection.Send({"Status": "206 Partial Content", "Headers": {"Content-Type": "audio/mpeg", "Content-Range": f"bytes {fileStartPosition}-{endByte}/{messageFileSize}", "Content-Length": str(len(fileContent)), "Accept-Ranges": "bytes"}, "Data": fileContent})
+                    noCacheHeaders = {
+                        "Content-Type": "audio/mpeg",
+                        "Accept-Ranges": "bytes",
+                        "Cache-Control": "no-store, no-cache, must-revalidate",
+                        "Pragma": "no-cache",
+                        "Expires": "0",
+                    }
+                    hasRange = 'Headers' in Data and 'Range' in Data.get('Headers', {})
+                    if hasRange:
+                        rangeHeader = Data['Headers']['Range']
+                        rangeSpec = rangeHeader[rangeHeader.find('=') + 1:]
+                        parts = rangeSpec.split('-', 1)
+                        fileStartPosition = int(parts[0]) if parts[0] else 0
+                        if parts[1]:
+                            fileEndPosition = min(int(parts[1]), messageFileSize - 1)
+                        else:
+                            fileEndPosition = min(fileStartPosition + KB_TO_XMIT - 1, messageFileSize - 1)
+                        chunkSize = fileEndPosition - fileStartPosition + 1
+                        messageFile = open(filePath, mode='rb')
+                        messageFile.seek(fileStartPosition)
+                        fileContent = messageFile.read(chunkSize)
+                        Domoticz.Debug(f"{Connection.Address}:{Connection.Port} Sent 'GET' request file '{urlPath}' range {fileStartPosition}-{fileEndPosition}/{messageFileSize}, {len(fileContent)} bytes")
+                        noCacheHeaders["Content-Range"] = f"bytes {fileStartPosition}-{fileEndPosition}/{messageFileSize}"
+                        noCacheHeaders["Content-Length"] = str(len(fileContent))
+                        Connection.Send({"Status": "206 Partial Content", "Headers": noCacheHeaders, "Data": fileContent})
+                    else:
+                        messageFile = open(filePath, mode='rb')
+                        fileContent = messageFile.read()
+                        Domoticz.Debug(f"{Connection.Address}:{Connection.Port} Sent 'GET' request file '{urlPath}' full, {messageFileSize} bytes")
+                        noCacheHeaders["Content-Length"] = str(messageFileSize)
+                        Connection.Send({"Status": "200 OK", "Headers": noCacheHeaders, "Data": fileContent})
 
             except Exception as inst:
                 Domoticz.Error(f"Exception detail: '{inst}'")
