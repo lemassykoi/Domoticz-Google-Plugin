@@ -32,7 +32,7 @@ Google Home, Google Home Mini, Google Nest Mini, Google Nest Hub, Google Nest Au
 ```bash
 cd domoticz/plugins
 git clone https://github.com/lemassykoi/Domoticz-Google-Plugin.git
-pip install pychromecast gtts --break-system-packages
+sudo pip install pychromecast gtts --break-system-packages
 sudo systemctl restart domoticz
 ```
 
