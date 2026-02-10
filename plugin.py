@@ -830,6 +830,8 @@ class BasePlugin:
         elif action == 'Set':
             if params.capitalize() == 'Level' or Command.lower() == 'volume':
                 if subUnit == DEV_VOLUME:
+                    if self.googleDevices[uuid].GoogleDevice.status.volume_muted:
+                        self.googleDevices[uuid].GoogleDevice.set_volume_muted(False)
                     currentVolume = self.googleDevices[uuid].GoogleDevice.status.volume_level
                     newVolume = Level / 100
                     if currentVolume > newVolume:
