@@ -478,7 +478,26 @@ class GoogleDevice:
                     fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
                     Domoticz.Error(f"{exc_type}, {fname}, Line: {exc_tb.tb_lineno}")
 
-    def StoreState(self):
+    def WaitReady(self, stop_event=None, timeout=15):
+        if self.Ready:
+            return True
+        Domoticz.Log(f"Waiting for '{self.Name}' to become ready...")
+        waited = 0
+        while not self.Ready and waited < timeout:
+            if stop_event is not None:
+                stop_event.wait(1.0)
+                if stop_event.is_set():
+                    return False
+            else:
+                time.sleep(1.0)
+            waited += 1
+        if self.Ready:
+            Domoticz.Log(f"'{self.Name}' is ready after {waited}s")
+        else:
+            Domoticz.Error(f"'{self.Name}' not ready after {timeout}s")
+        return self.Ready
+
+    def StoreState(self, stop_event=None):
         self.State.clear()
         if self.GoogleDevice.status is not None:
             self.State['Volume'] = self.GoogleDevice.status.volume_level
@@ -487,36 +506,37 @@ class GoogleDevice:
         if self.GoogleDevice.media_controller.status is not None:
             self.State['SupportsSeek'] = self.GoogleDevice.media_controller.status.supports_seek
 
-        self.GoogleDevice.quit_app()
-        self.GoogleDevice.set_volume(int(Parameters["Mode3"]) / 100)
-        self.GoogleDevice.set_volume_muted(False)
+        try:
+            self.GoogleDevice.set_volume(int(Parameters["Mode3"]) / 100)
+            self.GoogleDevice.set_volume_muted(False)
+        except Exception as err:
+            Domoticz.Debug(f"StoreState: volume failed ({err}), waiting for reconnect...")
+            if self.WaitReady(stop_event, timeout=15):
+                self.GoogleDevice.set_volume(int(Parameters["Mode3"]) / 100)
+                self.GoogleDevice.set_volume_muted(False)
 
     def RestoreState(self, stop_event=None):
         if self.State.get('Volume') is not None:
-            waited = 0
-            while not self.Ready and waited < 10:
-                Domoticz.Debug(f"RestoreState: Waiting for '{self.Name}' to reconnect...")
-                if stop_event is not None:
-                    stop_event.wait(1.0)
-                    if stop_event.is_set():
-                        return
-                else:
-                    time.sleep(1.0)
-                waited += 1
-            if not self.Ready:
-                Domoticz.Error(f"RestoreState: '{self.Name}' did not reconnect in time, state not restored.")
+            if not self.WaitReady(stop_event, timeout=15):
+                Domoticz.Error(f"RestoreState: '{self.Name}' not ready, state not restored.")
                 return
-            try:
-                self.GoogleDevice.quit_app()
-            except Exception as err:
-                Domoticz.Error(f"RestoreState: Failed to quit app: {err}")
             try:
                 if 'Volume' in self.State:
                     self.GoogleDevice.set_volume(self.State['Volume'])
                 if 'Muted' in self.State:
                     self.GoogleDevice.set_volume_muted(self.State['Muted'])
             except Exception as err:
-                Domoticz.Error(f"RestoreState: Failed to restore volume: {err}")
+                Domoticz.Debug(f"RestoreState: first attempt failed ({err}), waiting for reconnect...")
+                if self.WaitReady(stop_event, timeout=15):
+                    try:
+                        if 'Volume' in self.State:
+                            self.GoogleDevice.set_volume(self.State['Volume'])
+                        if 'Muted' in self.State:
+                            self.GoogleDevice.set_volume_muted(self.State['Muted'])
+                    except Exception as err2:
+                        Domoticz.Error(f"RestoreState: Failed to restore volume after retry: {err2}")
+                else:
+                    Domoticz.Error(f"RestoreState: '{self.Name}' not ready after retry, volume not restored.")
         else:
             Domoticz.Log("No device state to restore after notification")
 
@@ -576,71 +596,91 @@ class BasePlugin:
                         if self.googleDevices[uuid].GoogleDevice.status is not None and self.googleDevices[uuid].GoogleDevice.status.volume_muted:
                             Domoticz.Log(f"Device '{Message['Target']}' is muted, notification skipped.")
                             break
-                        if self.googleDevices[uuid].Ready:
-                            language = Parameters.get("Mode2", "").strip()
-                            if not language:
-                                language = Parameters["Language"]
-                            if language in langOverride:
-                                language = langOverride[language]
-                            Domoticz.Debug(f"handleMessage: TTS language='{language}'")
-                            tts = gTTS(Message["Text"], lang=language)
-                            messageFileName = os.path.join(messagesDir, uuid + '.mp3')
-                            tts.save(messageFileName)
-                            if not os.path.exists(messageFileName):
-                                Domoticz.Error(f"'{messageFileName}' not found, translation must have failed.")
-                                break
-                            else:
-                                Domoticz.Debug(f"'{messageFileName}' created, {os.path.getsize(messageFileName)} bytes")
+                        if not self.googleDevices[uuid].WaitReady(self.stop_event, timeout=15):
+                            Domoticz.Error(f"Google device '{Message['Target']}' is not connected, ignored.")
+                            break
+                        if self.stop_event.is_set():
+                            break
 
-                            self.googleDevices[uuid].StoreState()
-                            mc = self.googleDevices[uuid].GoogleDevice.media_controller
-                            cacheBuster = str(int(time.time() * 1000))
-                            mediaUrl = f"http://{ipAddress}:{ipPort}/{uuid}.mp3?t={cacheBuster}"
-                            fileSize = os.path.getsize(messageFileName)
-                            estimatedDuration = fileSize * 8 / 64000
+                        language = Parameters.get("Mode2", "").strip()
+                        if not language:
+                            language = Parameters["Language"]
+                        if language in langOverride:
+                            language = langOverride[language]
+                        Domoticz.Debug(f"handleMessage: TTS language='{language}'")
+                        tts = gTTS(Message["Text"], lang=language)
+                        messageFileName = os.path.join(messagesDir, uuid + '.mp3')
+                        tts.save(messageFileName)
+                        if not os.path.exists(messageFileName):
+                            Domoticz.Error(f"'{messageFileName}' not found, translation must have failed.")
+                            break
+                        else:
+                            Domoticz.Debug(f"'{messageFileName}' created, {os.path.getsize(messageFileName)} bytes")
+
+                        self.googleDevices[uuid].StoreState(self.stop_event)
+                        mc = self.googleDevices[uuid].GoogleDevice.media_controller
+                        cacheBuster = str(int(time.time() * 1000))
+                        mediaUrl = f"http://{ipAddress}:{ipPort}/{uuid}.mp3?t={cacheBuster}"
+                        fileSize = os.path.getsize(messageFileName)
+                        estimatedDuration = fileSize * 8 / 64000
+                        try:
                             mc.play_media(mediaUrl, 'audio/mpeg')
                             mc.block_until_active(timeout=10)
-                            self.stop_event.wait(1.5)
+                        except Exception as e:
+                            Domoticz.Error(f"play_media failed ({e}), retrying after reconnect...")
+                            if self.googleDevices[uuid].WaitReady(self.stop_event, timeout=15):
+                                mc.play_media(mediaUrl, 'audio/mpeg')
+                                mc.block_until_active(timeout=10)
+                            else:
+                                Domoticz.Error(f"Retry failed, device not ready")
+                                self.googleDevices[uuid].RestoreState(self.stop_event)
+                                break
+                        self.stop_event.wait(1.5)
+                        if self.stop_event.is_set():
+                            break
+                        sawPlaying = False
+                        durationSet = False
+                        endTime = time.time() + max(15, estimatedDuration + 10)
+                        playbackCompleted = False
+                        while time.time() < endTime and not self.stop_event.is_set():
+                            mc.update_status()
+                            self.stop_event.wait(0.5)
                             if self.stop_event.is_set():
                                 break
-                            sawPlaying = False
-                            durationSet = False
-                            endTime = time.time() + max(15, estimatedDuration + 10)
-                            playbackCompleted = False
-                            while time.time() < endTime and not self.stop_event.is_set():
-                                mc.update_status()
-                                self.stop_event.wait(0.5)
-                                if self.stop_event.is_set():
-                                    break
-                                if mc.status.player_is_playing or mc.status.player_is_paused:
-                                    sawPlaying = True
-                                if sawPlaying and not durationSet and mc.status.duration is not None:
-                                    endTime = time.time() + mc.status.duration + 5
-                                    durationSet = True
-                                if sawPlaying and mc.status.player_is_idle:
-                                    playbackCompleted = True
-                                    break
-                                if sawPlaying:
-                                    if mc.status.duration is not None:
-                                        Domoticz.Debug(f"Playing ({str(mc.status.adjusted_current_time)[:4]} of {mc.status.duration}, timeout in {str(endTime - time.time())[:4]} seconds)")
-                                    else:
-                                        Domoticz.Debug(f"Playing (unknown duration, timeout in {str(endTime - time.time())[:4]} seconds)")
+                            if mc.status.player_is_playing or mc.status.player_is_paused:
+                                sawPlaying = True
+                            if sawPlaying and not durationSet and mc.status.duration is not None:
+                                endTime = time.time() + mc.status.duration + 5
+                                durationSet = True
+                            if sawPlaying and mc.status.player_is_idle:
+                                playbackCompleted = True
+                                break
+                            if sawPlaying:
+                                if mc.status.duration is not None:
+                                    Domoticz.Debug(f"Playing ({str(mc.status.adjusted_current_time)[:4]} of {mc.status.duration}, timeout in {str(endTime - time.time())[:4]} seconds)")
                                 else:
-                                    Domoticz.Debug(f"Waiting for player to start (timeout in {str(endTime - time.time())[:4]} seconds)")
-                            if not self.stop_event.is_set():
-                                self.stop_event.wait(2.0)
-                            self.googleDevices[uuid].RestoreState(self.stop_event)
-
-                            if playbackCompleted:
-                                Domoticz.Log(f"Notification sent to '{Message['Target']}' completed")
-                                try:
-                                    os.remove(messageFileName)
-                                except OSError:
-                                    pass
+                                    Domoticz.Debug(f"Playing (unknown duration, timeout in {str(endTime - time.time())[:4]} seconds)")
                             else:
-                                Domoticz.Error(f"Notification sent to '{Message['Target']}' timed out")
+                                Domoticz.Debug(f"Waiting for player to start (timeout in {str(endTime - time.time())[:4]} seconds)")
+
+                        if playbackCompleted:
+                            playingUnit = self.googleDevices[uuid].PlayingUnit
+                            if playingUnit is not None:
+                                UpdateDevice(playingUnit, 2, '100', 0)
+                                UpdateDevice(playingUnit, 0, '0', 0)
+
+                        if not self.stop_event.is_set():
+                            self.stop_event.wait(2.0)
+                        self.googleDevices[uuid].RestoreState(self.stop_event)
+
+                        if playbackCompleted:
+                            Domoticz.Log(f"Notification sent to '{Message['Target']}' completed")
+                            try:
+                                os.remove(messageFileName)
+                            except OSError:
+                                pass
                         else:
-                            Domoticz.Error(f"Google device '{Message['Target']}' is not connected, ignored.")
+                            Domoticz.Error(f"Notification sent to '{Message['Target']}' timed out")
 
             except Exception as err:
                 Domoticz.Error(f"handleMessage: {err}")
