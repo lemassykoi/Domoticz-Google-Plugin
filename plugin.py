@@ -256,6 +256,8 @@ class GoogleDevice:
         self.GoogleDevice = googleDevice
         self.Ready = False
         self.Active = False
+        self.Connected = False
+        self.LastDisconnected = 0
         self.LogToFile("Google device created: " + str(self))
         self.State = {}
 
@@ -429,9 +431,15 @@ class GoogleDevice:
             try:
                 self.parent.LogToFile(new_status)
                 Domoticz.Status(self.parent.Name + " is now: " + str(new_status))
-                if new_status.status in ("DISCONNECTED", "LOST", "FAILED"):
+                if new_status.status == "CONNECTED":
+                    self.parent.Connected = True
+                    self.parent.LastDisconnected = 0
+                elif new_status.status in ("DISCONNECTED", "LOST", "FAILED"):
                     self.parent.Ready = False
                     self.parent.Active = False
+                    self.parent.Connected = False
+                    if self.parent.LastDisconnected == 0:
+                        self.parent.LastDisconnected = time.time()
 
                 for Unit in list(Devices):
                     if Devices[Unit].DeviceID.find(self.parent.UUID) >= 0:
@@ -478,7 +486,7 @@ class GoogleDevice:
                     fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
                     Domoticz.Error(f"{exc_type}, {fname}, Line: {exc_tb.tb_lineno}")
 
-    def WaitReady(self, stop_event=None, timeout=15):
+    def WaitReady(self, stop_event=None, timeout=30):
         if self.Ready:
             return True
         Domoticz.Log(f"Waiting for '{self.Name}' to become ready...")
@@ -511,13 +519,13 @@ class GoogleDevice:
             self.GoogleDevice.set_volume_muted(False)
         except Exception as err:
             Domoticz.Debug(f"StoreState: volume failed ({err}), waiting for reconnect...")
-            if self.WaitReady(stop_event, timeout=15):
+            if self.WaitReady(stop_event, timeout=30):
                 self.GoogleDevice.set_volume(int(Parameters["Mode3"]) / 100)
                 self.GoogleDevice.set_volume_muted(False)
 
     def RestoreState(self, stop_event=None):
         if self.State.get('Volume') is not None:
-            if not self.WaitReady(stop_event, timeout=15):
+            if not self.WaitReady(stop_event, timeout=30):
                 Domoticz.Error(f"RestoreState: '{self.Name}' not ready, state not restored.")
                 return
             try:
@@ -527,7 +535,7 @@ class GoogleDevice:
                     self.GoogleDevice.set_volume_muted(self.State['Muted'])
             except Exception as err:
                 Domoticz.Debug(f"RestoreState: first attempt failed ({err}), waiting for reconnect...")
-                if self.WaitReady(stop_event, timeout=15):
+                if self.WaitReady(stop_event, timeout=30):
                     try:
                         if 'Volume' in self.State:
                             self.GoogleDevice.set_volume(self.State['Volume'])
@@ -596,7 +604,7 @@ class BasePlugin:
                         if self.googleDevices[uuid].GoogleDevice.status is not None and self.googleDevices[uuid].GoogleDevice.status.volume_muted:
                             Domoticz.Log(f"Device '{Message['Target']}' is muted, notification skipped.")
                             break
-                        if not self.googleDevices[uuid].WaitReady(self.stop_event, timeout=15):
+                        if not self.googleDevices[uuid].WaitReady(self.stop_event, timeout=30):
                             Domoticz.Error(f"Google device '{Message['Target']}' is not connected, ignored.")
                             break
                         if self.stop_event.is_set():
@@ -628,7 +636,7 @@ class BasePlugin:
                             mc.block_until_active(timeout=10)
                         except Exception as e:
                             Domoticz.Error(f"play_media failed ({e}), retrying after reconnect...")
-                            if self.googleDevices[uuid].WaitReady(self.stop_event, timeout=15):
+                            if self.googleDevices[uuid].WaitReady(self.stop_event, timeout=30):
                                 mc.play_media(mediaUrl, 'audio/mpeg')
                                 mc.block_until_active(timeout=10)
                             else:
@@ -855,6 +863,14 @@ class BasePlugin:
         subUnit = Devices[Unit].DeviceID[-2:]
         Domoticz.Debug(f"UUID: {uuid}, sub unit: {subUnit}, Action: {action}, params: {params}")
 
+        if uuid not in self.googleDevices:
+            Domoticz.Error(f"Device UUID {uuid} not found in active devices")
+            return
+
+        if action not in ('Sendnotification', 'Trigger') and not self.googleDevices[uuid].Ready:
+            Domoticz.Error(f"[{self.googleDevices[uuid].Name}] Device not connected, command '{action}' ignored")
+            return
+
         if action == 'On':
             if subUnit == DEV_VOLUME:
                 self.googleDevices[uuid].GoogleDevice.set_volume_muted(False)
@@ -870,14 +886,12 @@ class BasePlugin:
         elif action == 'Set':
             if params.capitalize() == 'Level' or Command.lower() == 'volume':
                 if subUnit == DEV_VOLUME:
-                    if self.googleDevices[uuid].GoogleDevice.status.volume_muted:
-                        self.googleDevices[uuid].GoogleDevice.set_volume_muted(False)
-                    currentVolume = self.googleDevices[uuid].GoogleDevice.status.volume_level
-                    newVolume = Level / 100
-                    if currentVolume > newVolume:
-                        self.googleDevices[uuid].GoogleDevice.volume_down(currentVolume - newVolume)
-                    else:
-                        self.googleDevices[uuid].GoogleDevice.volume_up(newVolume - currentVolume)
+                    try:
+                        if self.googleDevices[uuid].GoogleDevice.status.volume_muted:
+                            self.googleDevices[uuid].GoogleDevice.set_volume_muted(False)
+                        self.googleDevices[uuid].GoogleDevice.set_volume(Level / 100)
+                    except Exception as e:
+                        Domoticz.Error(f"[{self.googleDevices[uuid].Name}] Failed to set volume: {e}")
                 elif subUnit == DEV_PLAYING:
                     if self.googleDevices[uuid].GoogleDevice.media_controller.status.duration is not None:
                         newPosition = self.googleDevices[uuid].GoogleDevice.media_controller.status.duration * (Level / 100)
@@ -915,9 +929,37 @@ class BasePlugin:
         elif action == 'Quit':
             self.googleDevices[uuid].GoogleDevice.quit_app()
 
+    def _reconnect_device(self, uuid):
+        dev = self.googleDevices[uuid]
+        cast_info = dev.GoogleDevice.cast_info
+        Domoticz.Log(f"[{dev.Name}] Forcing reconnection to reset backoff...")
+        try:
+            dev.GoogleDevice.disconnect(timeout=5)
+        except Exception as e:
+            Domoticz.Debug(f"[{dev.Name}] Disconnect error during reconnect: {e}")
+        try:
+            zconf = self.castBrowser.zc if self.castBrowser else None
+            new_cc = pychromecast.get_chromecast_from_cast_info(
+                cast_info, zconf, tries=None, retry_wait=5.0
+            )
+            self.googleDevices[uuid] = GoogleDevice(new_cc)
+            Domoticz.Log(f"[{dev.Name}] Reconnection initiated with fresh connection")
+        except Exception as e:
+            Domoticz.Error(f"[{dev.Name}] Reconnection failed: {e}")
+
     def onHeartbeat(self):
         for uuid in list(self.googleDevices):
             self.googleDevices[uuid].UpdatePlaying()
+
+            dev = self.googleDevices[uuid]
+            if not dev.Connected and dev.LastDisconnected > 0:
+                elapsed = time.time() - dev.LastDisconnected
+                if not dev.GoogleDevice.socket_client.is_alive():
+                    Domoticz.Error(f"[{dev.Name}] SocketClient thread died after {int(elapsed)}s, forcing reconnection...")
+                    self._reconnect_device(uuid)
+                elif elapsed > 120:
+                    Domoticz.Log(f"[{dev.Name}] Disconnected for {int(elapsed)}s, forcing reconnection to reset backoff...")
+                    self._reconnect_device(uuid)
 
         if not hasattr(self, '_plan_triggered') and _domoticz_port:
             created_device_idxs = []
