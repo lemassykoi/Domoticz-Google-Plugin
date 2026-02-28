@@ -648,6 +648,8 @@ class BasePlugin:
                             break
                         sawPlaying = False
                         durationSet = False
+                        retryAttempted = False
+                        waitStart = time.time()
                         endTime = time.time() + max(15, estimatedDuration + 10)
                         playbackCompleted = False
                         while time.time() < endTime and not self.stop_event.is_set():
@@ -663,6 +665,18 @@ class BasePlugin:
                             if sawPlaying and mc.status.player_is_idle:
                                 playbackCompleted = True
                                 break
+                            if not sawPlaying and not retryAttempted and time.time() - waitStart > 10:
+                                retryAttempted = True
+                                Domoticz.Log(f"[{self.googleDevices[uuid].Name}] Playback not started after 10s, retrying play_media...")
+                                try:
+                                    cacheBuster = str(int(time.time() * 1000))
+                                    mediaUrl = f"http://{ipAddress}:{ipPort}/{uuid}.mp3?t={cacheBuster}"
+                                    mc.play_media(mediaUrl, 'audio/mpeg')
+                                    mc.block_until_active(timeout=10)
+                                    waitStart = time.time()
+                                    endTime = time.time() + max(15, estimatedDuration + 10)
+                                except Exception as e:
+                                    Domoticz.Error(f"[{self.googleDevices[uuid].Name}] Retry play_media failed: {e}")
                             if sawPlaying:
                                 if mc.status.duration is not None:
                                     Domoticz.Debug(f"Playing ({str(mc.status.adjusted_current_time)[:4]} of {mc.status.duration}, timeout in {str(endTime - time.time())[:4]} seconds)")
